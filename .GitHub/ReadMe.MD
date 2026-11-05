@@ -527,4 +527,4 @@ See the `LICENSE` file. Personal and educational use is allowed. Credits and the
 
 ## Contact
 
-cryptex: [@Cryptex_here](https://t.me/Cryptex_here) on Telegram. Message directly for support, custom bots and business enquiries.
+cryptex: [Cryptex](https://t.me/Cryptex_here) on Telegram. Message directly for support, custom bots and business enquiries.
