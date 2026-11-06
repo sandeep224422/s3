@@ -54,40 +54,17 @@ async def play_commnd(
     url,
     fplay,
 ):
-    early = False
-    if await _wants_prejoin(message, chat_id, playmode, url):
-        early = await zef.prejoin_start(chat_id, video=bool(video))
-    try:
-        await _play_flow(
-            client,
-            message,
-            _,
-            chat_id,
-            video,
-            channel,
-            playmode,
-            url,
-            fplay,
-        )
-    finally:
-        if early:
-            try:
-                await zef.prejoin_settle(chat_id)
-            except Exception:
-                pass
-
-
-async def _wants_prejoin(message, chat_id, playmode, url):
-    if str(playmode) != "Direct":
-        return False
-    if await is_active_chat(chat_id):
-        return False
-    reply = message.reply_to_message
-    if reply and (reply.audio or reply.voice or reply.video or reply.document):
-        return False
-    if url:
-        return await YouTube.exists(url)
-    return len(message.command) >= 2
+    await _play_flow(
+        client,
+        message,
+        _,
+        chat_id,
+        video,
+        channel,
+        playmode,
+        url,
+        fplay,
+    )
 
 
 async def _play_flow(
@@ -401,6 +378,11 @@ async def _play_flow(
                     _["play_13"],
                     reply_markup=InlineKeyboardMarkup(buttons),
                 )
+        # Song is found now -> only NOW the assistant joins the VC
+        # (it joins while the file downloads, so no time is wasted).
+        early = False
+        if not await is_active_chat(chat_id):
+            early = await zef.prejoin_start(chat_id, video=bool(video))
         try:
             await stream(
                 _,
@@ -419,6 +401,12 @@ async def _play_flow(
             ex_type = type(e).__name__
             err = e if ex_type == "AssistantErr" else _["general_2"].format(f"{ex_type}: {e}")
             return await mystic.edit_text(err)
+        finally:
+            if early:
+                try:
+                    await zef.prejoin_settle(chat_id)
+                except Exception:
+                    pass
         return await play_logs(message, streamtype=streamtype)
     else:
         if plist_type:
@@ -500,19 +488,9 @@ async def play_music(client, CallbackQuery, _):
         await CallbackQuery.answer()
     except:
         pass
-    early = False
-    if not await is_active_chat(chat_id):
-        early = await zef.prejoin_start(chat_id, video=(mode == "v"))
-    try:
-        await _play_music_flow(
-            _, CallbackQuery, vidid, mode, cplay, fplay, chat_id, channel, user_name
-        )
-    finally:
-        if early:
-            try:
-                await zef.prejoin_settle(chat_id)
-            except Exception:
-                pass
+    await _play_music_flow(
+        _, CallbackQuery, vidid, mode, cplay, fplay, chat_id, channel, user_name
+    )
 
 
 async def _play_music_flow(
@@ -546,6 +524,10 @@ async def _play_music_flow(
         )
     video = True if mode == "v" else None
     ffplay = True if fplay == "f" else None
+    # Song is found now -> only NOW the assistant joins the VC
+    early = False
+    if not await is_active_chat(chat_id):
+        early = await zef.prejoin_start(chat_id, video=bool(video))
     try:
         await stream(
             _,
@@ -563,6 +545,12 @@ async def _play_music_flow(
         ex_type = type(e).__name__
         err = e if ex_type == "AssistantErr" else _["general_2"].format(f"{ex_type}: {e}")
         return await mystic.edit_text(err)
+    finally:
+        if early:
+            try:
+                await zef.prejoin_settle(chat_id)
+            except Exception:
+                pass
     return
 
 
@@ -693,7 +681,13 @@ async def slider_queries(client, CallbackQuery, _):
             await CallbackQuery.answer(_["playcb_2"])
         except:
             pass
-        title, duration_min, thumbnail, vidid = await YouTube.slider(query, query_type)
+        try:
+            title, duration_min, thumbnail, vidid = await YouTube.slider(query, query_type)
+        except Exception:
+            try:
+                return await CallbackQuery.answer(_["play_3"], show_alert=True)
+            except Exception:
+                return
         buttons = slider_markup(_, vidid, user_id, query, query_type, cplay, fplay)
         med = InputMediaPhoto(
             media=thumbnail,
@@ -714,7 +708,13 @@ async def slider_queries(client, CallbackQuery, _):
             await CallbackQuery.answer(_["playcb_2"])
         except:
             pass
-        title, duration_min, thumbnail, vidid = await YouTube.slider(query, query_type)
+        try:
+            title, duration_min, thumbnail, vidid = await YouTube.slider(query, query_type)
+        except Exception:
+            try:
+                return await CallbackQuery.answer(_["play_3"], show_alert=True)
+            except Exception:
+                return
         buttons = slider_markup(_, vidid, user_id, query, query_type, cplay, fplay)
         med = InputMediaPhoto(
             media=thumbnail,
