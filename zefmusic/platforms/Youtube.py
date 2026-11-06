@@ -25,6 +25,10 @@ ZEFRON_API_URL = (os.environ.get("ZEFRON_API_URL") or "https://zefronapi.me").rs
 ZEFRON_API_KEY = (os.environ.get("ZEFRON_API_KEY") or "").strip()
 ZEFRON_RETRIES = int(os.environ.get("ZEFRON_RETRIES", "2"))
 
+# Song search hard limit (seconds). Whole search (incl. retries) never exceeds this.
+SEARCH_TIMEOUT = float(os.environ.get("SEARCH_TIMEOUT", "10"))
+SEARCH_ATTEMPTS = max(1, int(os.environ.get("SEARCH_ATTEMPTS", "2")))
+
 DOWNLOAD_DIR = "downloads"
 DOWNLOAD_CONCURRENCY = int(os.environ.get("DOWNLOAD_CONCURRENCY", "4"))
 _semaphore = None
@@ -181,6 +185,32 @@ async def download_video(link: str) -> str | None:
     return await _download(link, "video")
 
 
+async def _search(query: str, limit: int = 1) -> list:
+    """YouTube search with a hard overall time limit (SEARCH_TIMEOUT seconds).
+
+    The time budget is split between the attempts, so a slow / stuck request is
+    cancelled and retried instead of making the user wait. Raises TimeoutError
+    if nothing is found in time.
+    """
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + SEARCH_TIMEOUT
+    for attempt in range(SEARCH_ATTEMPTS):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            break
+        per_attempt = remaining / (SEARCH_ATTEMPTS - attempt)
+        try:
+            data = await asyncio.wait_for(
+                VideosSearch(query, limit=limit).next(), per_attempt
+            )
+            result = (data or {}).get("result") or []
+            if result:
+                return result
+        except Exception as e:
+            LOGGER.warning("YouTube search attempt %s failed: %s", attempt + 1, e)
+    raise TimeoutError(f"YouTube search failed within {SEARCH_TIMEOUT:g}s")
+
+
 # --------------------------------------------------------------- autoplay
 AUTOPLAY_REQUEST_TIMEOUT = 20
 AUTOPLAY_MAX_RETRIES = 3
@@ -304,13 +334,12 @@ class YouTubeAPI:
             link = self.base + link
         if "&" in link:
             link = link.split("&")[0]
-        results = VideosSearch(link, limit=1)
-        for result in (await results.next())["result"]:
-            title = result["title"]
-            duration_min = result["duration"]
-            thumbnail = result["thumbnails"][0]["url"].split("?")[0]
-            vidid = result["id"]
-            duration_sec = int(time_to_seconds(duration_min)) if duration_min else 0
+        result = (await _search(link, 1))[0]
+        title = result["title"]
+        duration_min = result["duration"]
+        thumbnail = result["thumbnails"][0]["url"].split("?")[0]
+        vidid = result["id"]
+        duration_sec = int(time_to_seconds(duration_min)) if duration_min else 0
         return title, duration_min, duration_sec, thumbnail, vidid
 
     async def title(self, link: str, videoid: Union[bool, str] = None):
@@ -318,27 +347,22 @@ class YouTubeAPI:
             link = self.base + link
         if "&" in link:
             link = link.split("&")[0]
-        results = VideosSearch(link, limit=1)
-        for result in (await results.next())["result"]:
-            return result["title"]
+        return (await _search(link, 1))[0]["title"]
 
     async def duration(self, link: str, videoid: Union[bool, str] = None):
         if videoid:
             link = self.base + link
         if "&" in link:
             link = link.split("&")[0]
-        results = VideosSearch(link, limit=1)
-        for result in (await results.next())["result"]:
-            return result["duration"]
+        return (await _search(link, 1))[0]["duration"]
 
     async def thumbnail(self, link: str, videoid: Union[bool, str] = None):
         if videoid:
             link = self.base + link
         if "&" in link:
             link = link.split("&")[0]
-        results = VideosSearch(link, limit=1)
-        for result in (await results.next())["result"]:
-            return result["thumbnails"][0]["url"].split("?")[0]
+        result = (await _search(link, 1))[0]
+        return result["thumbnails"][0]["url"].split("?")[0]
 
     async def video(self, link: str, videoid: Union[bool, str] = None):
         if videoid:
@@ -378,13 +402,12 @@ class YouTubeAPI:
             link = self.base + link
         if "&" in link:
             link = link.split("&")[0]
-        results = VideosSearch(link, limit=1)
-        for result in (await results.next())["result"]:
-            title = result["title"]
-            duration_min = result["duration"]
-            vidid = result["id"]
-            yturl = result["link"]
-            thumbnail = result["thumbnails"][0]["url"].split("?")[0]
+        result = (await _search(link, 1))[0]
+        title = result["title"]
+        duration_min = result["duration"]
+        vidid = result["id"]
+        yturl = result["link"]
+        thumbnail = result["thumbnails"][0]["url"].split("?")[0]
         track_details = {
             "title": title,
             "link": yturl,
@@ -426,8 +449,8 @@ class YouTubeAPI:
             link = self.base + link
         if "&" in link:
             link = link.split("&")[0]
-        a = VideosSearch(link, limit=10)
-        result = (await a.next()).get("result")
+        result = await _search(link, 10)
+        query_type = min(query_type, len(result) - 1)
         title = result[query_type]["title"]
         duration_min = result[query_type]["duration"]
         vidid = result[query_type]["id"]
