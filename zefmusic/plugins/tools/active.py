@@ -1,8 +1,9 @@
 import asyncio
+import html
 import re
 import time
 
-from pyrogram import filters
+from pyrogram import errors, filters
 from pyrogram.enums import ButtonStyle
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 from unidecode import unidecode
@@ -16,12 +17,14 @@ from zefmusic.utils.database import (
     remove_active_chat,
     remove_active_video_chat,
 )
+from zefmusic.logging import LOGGER
 from zefmusic.utils.rich_stream import edit_card
 from strings import get_string
 
 FETCH_CONCURRENCY = 15
 DISPLAY_LIMIT = 60
 REFRESH_COOLDOWN = 5
+RESOLVE_TIMEOUT = 8  # seconds per get_chat call
 TEXT_LIMIT = 3900  # Telegram caps a text message at 4096 characters
 
 _gate = asyncio.Semaphore(FETCH_CONCURRENCY)
@@ -32,19 +35,38 @@ async def _lang(chat_id):
     return get_string(await get_lang(chat_id))
 
 
+# Only these mean the chat is really gone -> safe to remove it from the active list.
+_DEAD_CHAT_ERRORS = (
+    errors.ChannelInvalid,
+    errors.ChannelPrivate,
+    errors.ChatInvalid,
+    errors.PeerIdInvalid,
+)
+
+
 async def _resolve(chat_id, drop):
+    chat = None
     async with _gate:
         try:
-            chat = await nand.get_chat(chat_id)
-        except Exception:
+            chat = await asyncio.wait_for(nand.get_chat(chat_id), RESOLVE_TIMEOUT)
+        except _DEAD_CHAT_ERRORS:
             await drop(chat_id)
             return None
-    title = unidecode((chat.title or str(chat_id)).strip()).upper() or str(chat_id)
-    return {"id": chat_id, "title": title, "username": chat.username}
+        except Exception as e:
+            # Flood wait / timeout / network hiccup: keep the chat, just show its id.
+            LOGGER(__name__).warning("get_chat(%s) failed: %s: %s", chat_id, type(e).__name__, e)
+    if chat is None:
+        return {"id": chat_id, "title": str(chat_id), "username": None}
+    raw_title = unidecode((chat.title or str(chat_id)).strip()).upper() or str(chat_id)
+    return {
+        "id": chat_id,
+        "title": html.escape(raw_title),
+        "username": chat.username,
+    }
 
 
 async def _resolve_all(chat_ids, drop):
-    tasks = [asyncio.ensure_future(_resolve(cid, drop)) for cid in chat_ids]
+    tasks = [asyncio.ensure_future(_resolve(cid, drop)) for cid in list(chat_ids)]
     resolved = await asyncio.gather(*tasks) if tasks else []
     return [r for r in resolved if r]
 
@@ -115,9 +137,13 @@ async def _launch(message: Message, kind):
     loading = await message.reply_text(_["ACTIVE_LOADING"])
     try:
         await _render(_, kind, loading)
-    except Exception:
+    except Exception as e:
+        LOGGER(__name__).exception("/active command failed: %s: %s", type(e).__name__, e)
         try:
-            await loading.edit_text(_["ACTIVE_FAILED"])
+            await loading.edit_text(
+                f"{_['ACTIVE_FAILED']}\n\n<code>{html.escape(type(e).__name__)}: "
+                f"{html.escape(str(e))[:300]}</code>"
+            )
         except Exception:
             pass
 
@@ -149,5 +175,6 @@ async def active_callback(client, cq):
     await cq.answer(_["ACTIVE_REFRESHING"])
     try:
         await _render(_, kind, cq.message)
-    except Exception:
+    except Exception as e:
+        LOGGER(__name__).exception("/active refresh failed: %s: %s", type(e).__name__, e)
         await cq.answer(_["ACTIVE_FAILED"], show_alert=True)
